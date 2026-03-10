@@ -14,8 +14,87 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Standard response envelope
 const formatResponse = (data = null, error = null) => ({ data, error });
+
+const ALLOWED_UPDATE_FIELDS = [
+  'first_name',
+  'last_name',
+  'date_of_birth',
+  'sex',
+  'phone_number',
+  'email',
+  'address_line_1',
+  'address_line_2',
+  'city',
+  'state',
+  'zip_code',
+  'insurance_provider',
+  'insurance_member_id',
+  'preferred_language',
+  'emergency_contact_name',
+  'emergency_contact_phone'
+];
+
+function normalizePhoneNumber(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const digits = String(value).replace(/\D/g, '');
+
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+
+  return digits;
+}
+
+async function updatePatientHandler(req, res) {
+  try {
+    const requestEntries = Object.entries(req.body).filter(([key]) =>
+      ALLOWED_UPDATE_FIELDS.includes(key)
+    );
+
+    if (requestEntries.length === 0) {
+      return res.status(400).json(formatResponse(null, 'No fields to update'));
+    }
+
+    const updates = [];
+    const params = [];
+
+    requestEntries.forEach(([key, value], index) => {
+      let finalValue = value;
+
+      if (key === 'phone_number' && value !== null) {
+        finalValue = normalizePhoneNumber(value);
+      }
+
+      updates.push(`${key} = $${index + 1}`);
+      params.push(finalValue);
+    });
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(req.params.id);
+
+    const sql = `
+      UPDATE patients
+      SET ${updates.join(', ')}
+      WHERE patient_id = $${params.length}
+        AND deleted_at IS NULL
+      RETURNING *
+    `;
+
+    const result = await pool.query(sql, params);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json(formatResponse(null, 'Patient not found'));
+    }
+
+    return res.status(200).json(formatResponse(result.rows[0], null));
+  } catch (err) {
+    return res.status(500).json(formatResponse(null, err.message));
+  }
+}
 
 /**
  * POST /patients
@@ -43,6 +122,8 @@ app.post('/patients', patientValidationRules(), validate, async (req, res) => {
       emergency_contact_name,
       emergency_contact_phone
     } = req.body;
+
+    const normalizedPhoneNumber = normalizePhoneNumber(phone_number);
 
     const sql = `
       INSERT INTO patients (
@@ -77,7 +158,7 @@ app.post('/patients', patientValidationRules(), validate, async (req, res) => {
       last_name,
       date_of_birth,
       sex,
-      phone_number,
+      normalizedPhoneNumber,
       email || null,
       address_line_1,
       address_line_2 || null,
@@ -120,7 +201,8 @@ app.get('/patients', async (req, res) => {
     }
 
     if (phone_number) {
-      params.push(phone_number);
+      const normalizedPhoneNumber = normalizePhoneNumber(phone_number);
+      params.push(normalizedPhoneNumber);
       sql += ` AND phone_number = $${params.length}`;
     }
 
@@ -128,6 +210,42 @@ app.get('/patients', async (req, res) => {
 
     const result = await pool.query(sql, params);
     return res.status(200).json(formatResponse(result.rows, null));
+  } catch (err) {
+    return res.status(500).json(formatResponse(null, err.message));
+  }
+});
+
+/**
+ * GET /patients/by-phone/:phone
+ * Fetch the first non-deleted patient with the given phone number
+ */
+app.get('/patients/by-phone/:phone', async (req, res) => {
+  try {
+    const normalizedPhoneNumber = normalizePhoneNumber(req.params.phone);
+
+    if (!normalizedPhoneNumber || normalizedPhoneNumber.length !== 10) {
+      return res
+        .status(400)
+        .json(formatResponse(null, 'Phone number must be a valid 10-digit U.S. number'));
+    }
+
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM patients
+      WHERE phone_number = $1
+        AND deleted_at IS NULL
+      ORDER BY created_at ASC
+      LIMIT 1
+      `,
+      [normalizedPhoneNumber]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json(formatResponse(null, 'Patient not found'));
+    }
+
+    return res.status(200).json(formatResponse(result.rows[0], null));
   } catch (err) {
     return res.status(500).json(formatResponse(null, err.message));
   }
@@ -158,65 +276,13 @@ app.get('/patients/:id', async (req, res) => {
  * PUT /patients/:id
  * Partial update
  */
-app.put('/patients/:id', patientUpdateRules(), validate, async (req, res) => {
-  try {
-    const allowedFields = [
-      'first_name',
-      'last_name',
-      'date_of_birth',
-      'sex',
-      'phone_number',
-      'email',
-      'address_line_1',
-      'address_line_2',
-      'city',
-      'state',
-      'zip_code',
-      'insurance_provider',
-      'insurance_member_id',
-      'preferred_language',
-      'emergency_contact_name',
-      'emergency_contact_phone'
-    ];
+app.put('/patients/:id', patientUpdateRules(), validate, updatePatientHandler);
 
-    const requestEntries = Object.entries(req.body).filter(([key]) =>
-      allowedFields.includes(key)
-    );
-
-    if (requestEntries.length === 0) {
-      return res.status(400).json(formatResponse(null, 'No fields to update'));
-    }
-
-    const updates = [];
-    const params = [];
-
-    requestEntries.forEach(([key, value], index) => {
-      updates.push(`${key} = $${index + 1}`);
-      params.push(value);
-    });
-
-    updates.push(`updated_at = CURRENT_TIMESTAMP`);
-    params.push(req.params.id);
-
-    const sql = `
-      UPDATE patients
-      SET ${updates.join(', ')}
-      WHERE patient_id = $${params.length}
-        AND deleted_at IS NULL
-      RETURNING *
-    `;
-
-    const result = await pool.query(sql, params);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json(formatResponse(null, 'Patient not found'));
-    }
-
-    return res.status(200).json(formatResponse(result.rows[0], null));
-  } catch (err) {
-    return res.status(500).json(formatResponse(null, err.message));
-  }
-});
+/**
+ * PATCH /patients/:id
+ * Partial update
+ */
+app.patch('/patients/:id', patientUpdateRules(), validate, updatePatientHandler);
 
 /**
  * DELETE /patients/:id
