@@ -494,7 +494,3 @@ Possible extensions:
 * Rate limiting
 * HIPAA compliant logging
 * Insurance verification integrations
-
----
-
-If you want, I can also make a **much stronger “impressive recruiter-ready README”** (with architecture diagrams, request flow, and sequence diagrams) that makes the repo look like a **senior-level backend project**, which would help a lot for AI/voice engineering roles.
